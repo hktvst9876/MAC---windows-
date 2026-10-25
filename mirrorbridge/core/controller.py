@@ -66,7 +66,9 @@ class Controller(QObject):
         identity = PairingIdentity.from_seed(bytes.fromhex(self.config.identity_seed))
         device_id = bytes.fromhex(self.config.device_id)
         settings = self._settings()
-        self.server = AirPlayServer(settings, identity, device_id, self._make_handler)
+        self.server = AirPlayServer(
+            settings, identity, device_id, self._make_handler,
+            external_session_count=self._external_session_count)
         try:
             await self.server.start()
         except OSError as exc:
@@ -140,6 +142,10 @@ class Controller(QObject):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     # -- sessions --------------------------------------------------------
+
+    def _external_session_count(self):
+        with self._lock:
+            return sum(session.airplay is None for session in self.sessions.values())
 
     def _make_handler(self, airplay_session):
         return DeviceSession(self, airplay_session)

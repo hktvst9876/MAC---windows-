@@ -180,6 +180,8 @@ class WebCastServer:
         self.requested_port = port
         self._server = None
         self.sessions = set()
+        self._clients = {}
+        self._running = False
 
     @property
     def port(self) -> int:
@@ -196,20 +198,40 @@ class WebCastServer:
         ctx.load_cert_chain(cert, key)
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(_quiet_tls_errors)
+        self._running = True
         try:
-            self._server = await asyncio.start_server(self._client, host, self.requested_port, ssl=ctx)
-        except OSError:
-            self._server = await asyncio.start_server(self._client, host, 0, ssl=ctx)
+            try:
+                self._server = await asyncio.start_server(self._client, host, self.requested_port, ssl=ctx)
+            except OSError:
+                self._server = await asyncio.start_server(self._client, host, 0, ssl=ctx)
+        except BaseException:
+            self._running = False
+            raise
         log.info("browser casting available at %s", self.url)
 
     async def stop(self):
-        for session in list(self.sessions):
-            session.close()
+        self._running = False
         if self._server:
             self._server.close()
+            await self._server.wait_closed()
             self._server = None
+        for session in list(self.sessions):
+            session.close()
+        # Upgraded connections waiting for hello are not sessions yet. They
+        # must be closed too, or they can admit a caster after disabling us.
+        clients = list(self._clients.items())
+        for task, writer in clients:
+            writer.close()
+            task.cancel()
+        if clients:
+            await asyncio.gather(*(task for task, _ in clients), return_exceptions=True)
 
     async def _client(self, reader, writer):
+        task = asyncio.current_task()
+        if not self._running:
+            writer.close()
+            return
+        self._clients[task] = writer
         peer = (writer.get_extra_info("peername") or ("?", 0))[0]
         try:
             request = await read_request(reader)
@@ -232,6 +254,7 @@ class WebCastServer:
         except Exception:
             log.exception("browser cast request failed")
         finally:
+            self._clients.pop(task, None)
             writer.close()
 
     @staticmethod
@@ -247,11 +270,15 @@ class WebCastServer:
             hello = json.loads(data.decode("utf-8")) if opcode == OP_TEXT else {}
             if hello.get("type") != "hello":
                 return
+            if not self._running:
+                return
             config = self.controller.config
             if config.password and hello.get("password") != config.password:
                 await ws.send_text(json.dumps({"type": "error", "message": "Wrong password."}))
                 return
-            if len(self.controller.sessions) >= config.max_sessions:
+            airplay = getattr(self.controller, "server", None)
+            session_count = airplay.session_count if airplay is not None else len(self.controller.sessions)
+            if session_count >= config.max_sessions:
                 await ws.send_text(json.dumps({"type": "error",
                                                "message": "The receiver is busy with other devices."}))
                 return

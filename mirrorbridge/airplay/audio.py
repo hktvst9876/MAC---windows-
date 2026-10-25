@@ -73,10 +73,14 @@ class AudioStream:
 
     async def start(self, host="0.0.0.0", data_port=0, control_port=0):
         loop = asyncio.get_running_loop()
-        dt, self._data = await loop.create_datagram_endpoint(
-            lambda: _Endpoint(self._on_data), local_addr=(host, data_port))
-        ct, self._control = await loop.create_datagram_endpoint(
-            lambda: _Endpoint(self._on_control), local_addr=(host, control_port))
+        try:
+            dt, self._data = await loop.create_datagram_endpoint(
+                lambda: _Endpoint(self._on_data), local_addr=(host, data_port))
+            ct, self._control = await loop.create_datagram_endpoint(
+                lambda: _Endpoint(self._on_control), local_addr=(host, control_port))
+        except BaseException:
+            self.stop()
+            raise
         return dt.get_extra_info("sockname")[1], ct.get_extra_info("sockname")[1]
 
     def decrypt(self, packet: bytes) -> bytes:
@@ -88,18 +92,32 @@ class AudioStream:
         return dec.update(payload[:n]) + payload[n:]
 
     def _on_data(self, data, addr):
-        self._enqueue(data)
+        if addr[0] == self.remote_ip and self._valid_rtp(data):
+            self._enqueue(data)
+
+    @staticmethod
+    def _valid_rtp(data):
+        return len(data) >= 12 and data[0] & 0xC0 == 0x80
 
     def _on_control(self, data, addr):
-        if len(data) < 4:
+        if addr[0] != self.remote_ip or len(data) < 4 or data[0] & 0xC0 != 0x80:
             return
-        if self._control_addr is None:
-            self._control_addr = addr
+        if self.remote_control_port and addr[1] != self.remote_control_port:
+            return
+        if self._control_addr is not None and addr != self._control_addr:
+            return
         ptype = data[1] & 0x7F
-        if ptype == 0x56 and len(data) >= 16:
+        retransmission = ptype == 0x56 and self._valid_rtp(data[4:])
+        sync = ptype == 0x54 and len(data) >= 20
+        if not (retransmission or sync):
+            return
+        # Learn an unadvertised control port only from a valid packet sent by
+        # the negotiated peer. Invalid datagrams must not pin the destination.
+        self._control_addr = addr
+        if retransmission:
             # Retransmitted packet (RTP packet starts at offset 4).
             self._enqueue(data[4:])
-        elif ptype == 0x54 and len(data) >= 20:
+        elif sync:
             self.sync_rtp = struct.unpack_from(">I", data, 4)[0]
             self.sync_ntp = struct.unpack_from(">Q", data, 8)[0]
 

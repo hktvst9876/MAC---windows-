@@ -61,6 +61,7 @@ class DeviceSession(SessionHandler):
         self.metadata_items = {}
         self.connected_at = time.time()
         self.recorder = None
+        self._recording_lock = threading.Lock()
         self.decoder = VideoDecoder(on_display=self._on_display, hardware=self.config.hardware_decoding)
         self._audio_decoder = None
         self._player = None
@@ -80,11 +81,11 @@ class DeviceSession(SessionHandler):
 
     def video_format(self, codec, config, width, height):
         self.codec, self.width, self.height = codec, width, height
-        self.decoder.set_codec(codec)
+        self.decoder.set_codec(codec, config)
         self.signals.video_format.emit(codec, width, height)
 
     def video_packet(self, data, timestamp_ns, keyframe):
-        self.decoder.push(data)
+        return self.decoder.push_async(data, keyframe=keyframe)
 
     def video_paused(self, paused):
         self.paused = paused
@@ -156,10 +157,12 @@ class DeviceSession(SessionHandler):
         self.signals.progress.emit(start, current, end)
 
     def stopped(self):
-        if self._ended:
-            return
-        self._ended = True
-        if self.recorder is not None:
+        with self._recording_lock:
+            if self._ended:
+                return
+            self._ended = True
+            recording = self.recorder is not None
+        if recording:
             # Finalizing the MP4 can take a moment; keep the network thread free.
             threading.Thread(target=self.stop_recording, name="finish-recording").start()
         self.decoder.stop()
@@ -205,14 +208,28 @@ class DeviceSession(SessionHandler):
     def _stamp(self):
         return datetime.now().strftime("%Y-%m-%d %H.%M.%S")
 
+    def _reserve_capture(self, folder, extension):
+        """Claim a new filename even when captures share a name and timestamp."""
+        folder = Path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = "%s %s" % (_safe_filename(self.display_name), self._stamp())
+        number = 1
+        while True:
+            suffix = "" if number == 1 else " (%d)" % number
+            path = folder / (stem + suffix + extension)
+            try:
+                return path, path.open("xb")
+            except FileExistsError:
+                number += 1
+
     def screenshot(self, folder=None) -> Path:
         frame = self.decoder.latest_frame
         if frame is None:
             raise RuntimeError("There is no picture to capture yet.")
-        folder = Path(folder or self.config.screenshot_folder)
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / ("%s %s.png" % (_safe_filename(self.display_name), self._stamp()))
-        path.write_bytes(frame_to_png(frame))
+        image = frame_to_png(frame)
+        path, output = self._reserve_capture(folder or self.config.screenshot_folder, ".png")
+        with output:
+            output.write(image)
         log.info("screenshot saved: %s", path)
         return path
 
@@ -221,22 +238,40 @@ class DeviceSession(SessionHandler):
         return self.recorder is not None and self.recorder.running
 
     def start_recording(self, folder=None) -> Path:
-        if self.is_recording:
-            return Path(self.recorder.path)
-        folder = Path(folder or self.config.record_folder)
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / ("%s %s.mp4" % (_safe_filename(self.display_name), self._stamp()))
-        recorder = Recorder(path, lambda: self.decoder.latest_frame, fps=self.config.record_fps,
-                            device_audio=self.config.record_device_audio,
-                            microphone=self.config.record_microphone,
-                            mic_device=self.config.mic_device or None)
-        recorder.start()
-        self.recorder = recorder
+        with self._recording_lock:
+            if self._ended:
+                raise RuntimeError("The device has disconnected.")
+            if self.is_recording:
+                return Path(self.recorder.path)
+        path, output = self._reserve_capture(folder or self.config.record_folder, ".mp4")
+        output.close()
+        recorder = None
+        try:
+            recorder = Recorder(path, lambda: self.decoder.latest_frame, fps=self.config.record_fps,
+                                device_audio=self.config.record_device_audio,
+                                microphone=self.config.record_microphone,
+                                mic_device=self.config.mic_device or None)
+            recorder.start()
+            with self._recording_lock:
+                if self._ended:
+                    raise RuntimeError("The device disconnected while recording was starting.")
+                self.recorder = recorder
+        except Exception:
+            if recorder is not None:
+                recorder.stop()
+            # This path was created exclusively by us; existing captures were skipped.
+            try:
+                if path.stat().st_size == 0:
+                    path.unlink()
+            except OSError:
+                pass
+            raise
         self.signals.recording.emit(True, str(path))
         return path
 
     def stop_recording(self):
-        recorder, self.recorder = self.recorder, None
+        with self._recording_lock:
+            recorder, self.recorder = self.recorder, None
         if recorder is None:
             return None
         recorder.stop()

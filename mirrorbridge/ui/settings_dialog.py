@@ -4,11 +4,11 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QTabWidget,
                                QVBoxLayout, QWidget)
 
-from ..media.audio import input_devices, output_devices
+from ..media.audio import device_label, input_devices, output_devices
 
 # Settings that require the receiver to be restarted (devices disconnect).
 RESTART_KEYS = ("name", "port", "resolution", "max_fps", "h265", "password", "max_sessions",
-                "webcast_enabled", "webcast_port")
+                "webcast_enabled", "webcast_port", "audio_enabled", "audio_device", "hardware_decoding")
 
 
 class SettingsDialog(QDialog):
@@ -36,6 +36,15 @@ class SettingsDialog(QDialog):
         label.setWordWrap(True)
         label.setStyleSheet("color: palette(mid); font-size: 11px;")
         return label
+
+    @staticmethod
+    def _select_device(combo, selected):
+        index = combo.findData(selected)
+        if index < 0 and selected:
+            # Keep old plain-name settings and temporarily disconnected devices.
+            combo.addItem(device_label(selected), selected)
+            index = combo.count() - 1
+        combo.setCurrentIndex(max(0, index))
 
     def _general_tab(self):
         w = QWidget()
@@ -96,10 +105,9 @@ class SettingsDialog(QDialog):
         f.addRow("", self.audio)
         self.audio_device = QComboBox()
         self.audio_device.addItem("System default", "")
-        for index, name in output_devices():
-            self.audio_device.addItem(name, name)
-        idx = self.audio_device.findData(self.config.audio_device)
-        self.audio_device.setCurrentIndex(max(0, idx))
+        for identifier, label in output_devices():
+            self.audio_device.addItem(label, identifier)
+        self._select_device(self.audio_device, self.config.audio_device)
         f.addRow("Output device:", self.audio_device)
         return w
 
@@ -141,9 +149,9 @@ class SettingsDialog(QDialog):
         f.addRow("", self.rec_mic)
         self.mic_device = QComboBox()
         self.mic_device.addItem("System default", "")
-        for index, name in input_devices():
-            self.mic_device.addItem(name, name)
-        self.mic_device.setCurrentIndex(max(0, self.mic_device.findData(self.config.mic_device)))
+        for identifier, label in input_devices():
+            self.mic_device.addItem(label, identifier)
+        self._select_device(self.mic_device, self.config.mic_device)
         f.addRow("Microphone:", self.mic_device)
         return w
 

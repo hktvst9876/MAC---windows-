@@ -1,6 +1,7 @@
 """Audio decoding (AAC-ELD, AAC-LC, ALAC, PCM) and playback."""
 
 import collections
+import json
 import logging
 import threading
 
@@ -16,6 +17,7 @@ except (ImportError, OSError) as exc:  # PortAudio missing
     log.warning("audio playback unavailable: %s", exc)
 
 SAMPLE_RATE = 44100
+_DEVICE_PREFIX = "mirrorbridge-device:"
 
 # Decoder configuration per codec, as used by AirPlay senders:
 #  AAC-ELD 44.1 kHz stereo, 480 samples/frame (AudioSpecificConfig)
@@ -94,7 +96,8 @@ class AudioPlayer:
             return
         try:
             self._stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=2, dtype="float32",
-                                           callback=self._callback, latency="low", device=device)
+                                           callback=self._callback, latency="low",
+                                           device=resolve_device(device, "output"))
             self._stream.start()
         except Exception as exc:
             log.warning("cannot open audio output: %s", exc)
@@ -168,19 +171,69 @@ class AudioPlayer:
             self._stream = None
 
 
-def output_devices():
+def _device_identity(device):
+    if not isinstance(device, str) or not device.startswith(_DEVICE_PREFIX):
+        return None
+    try:
+        identity = json.loads(device[len(_DEVICE_PREFIX):])
+        if not (isinstance(identity, list) and len(identity) == 2
+                and all(isinstance(part, str) for part in identity)):
+            raise ValueError
+        return identity
+    except (ValueError, TypeError) as exc:
+        raise ValueError("Invalid saved audio device") from exc
+
+
+def device_label(device):
+    """Readable label for a saved identity, including a disconnected device."""
+    try:
+        identity = _device_identity(device)
+    except ValueError:
+        return str(device)
+    return "%s (%s)" % (identity[1], identity[0]) if identity else str(device)
+
+
+def resolve_device(device, kind):
+    """Resolve a persistent name/host-API identity to the current PortAudio index.
+
+    Older settings used sounddevice's plain-name queries; leave those and numeric
+    indices intact so existing configurations remain usable.
+    """
+    identity = _device_identity(device)
+    if identity is None:
+        return None if device == "" else device
+    if sd is None:
+        raise RuntimeError("Audio devices are unavailable")
+    hostapi, name = identity
+    hostapis = sd.query_hostapis()
+    matches = [index for index, info in enumerate(sd.query_devices())
+               if info["max_" + kind + "_channels"] > 0 and info["name"] == name
+               and hostapis[info["hostapi"]]["name"] == hostapi]
+    if len(matches) != 1:
+        reason = "not available" if not matches else "ambiguous"
+        raise ValueError("Audio device %s is %s" % (device_label(device), reason))
+    return matches[0]
+
+
+def _devices(kind):
     if sd is None:
         return []
     try:
-        return [(i, d["name"]) for i, d in enumerate(sd.query_devices()) if d["max_output_channels"] > 0]
+        hostapis = sd.query_hostapis()
+        devices = []
+        for info in sd.query_devices():
+            if info["max_" + kind + "_channels"] > 0:
+                identity = [hostapis[info["hostapi"]]["name"], info["name"]]
+                identifier = _DEVICE_PREFIX + json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+                devices.append((identifier, device_label(identifier)))
+        return devices
     except Exception:
         return []
+
+
+def output_devices():
+    return _devices("output")
 
 
 def input_devices():
-    if sd is None:
-        return []
-    try:
-        return [(i, d["name"]) for i, d in enumerate(sd.query_devices()) if d["max_input_channels"] > 0]
-    except Exception:
-        return []
+    return _devices("input")
