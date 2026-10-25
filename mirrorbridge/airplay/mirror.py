@@ -13,6 +13,7 @@ Video is handed on in Annex-B format (start codes instead of lengths).
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import struct
 
@@ -98,8 +99,10 @@ class MirrorStream:
     video_stopped().
     """
 
-    def __init__(self, aeskey: bytes, stream_connection_id: int, handler):
+    def __init__(self, aeskey: bytes, stream_connection_id: int, handler, remote_ip: str):
         self.handler = handler
+        self.remote_ip = remote_ip
+        self._accepting = False
         self._cipher = stream_cipher(aeskey, stream_connection_id)
         self._server = None
         self._conn_task = None
@@ -113,13 +116,21 @@ class MirrorStream:
         self._pending_config = None
 
     async def start(self, host="0.0.0.0", port=0) -> int:
-        self._server = await asyncio.start_server(self._on_connect, host, port)
+        self._accepting = True
+        try:
+            self._server = await asyncio.start_server(self._on_connect, host, port)
+        except BaseException:
+            self._accepting = False
+            raise
         return self._server.sockets[0].getsockname()[1]
 
     async def _on_connect(self, reader, writer):
-        if self._writer is not None:
-            log.info("mirror stream: replacing previous data connection")
-            self._writer.close()
+        peer = writer.get_extra_info("peername")
+        if not self._accepting or not peer or peer[0] != self.remote_ip or self._writer is not None:
+            # A data connection never authenticates itself. Bind it to the
+            # negotiated RTSP peer and never let it evict an active sender.
+            writer.close()
+            return
         self._writer = writer
         self._conn_task = asyncio.current_task()
         try:
@@ -134,6 +145,7 @@ class MirrorStream:
             writer.close()
             if self._writer is writer:
                 self._writer = None
+                self._conn_task = None
 
     async def _read_loop(self, reader):
         while True:
@@ -142,14 +154,18 @@ class MirrorStream:
             if size > MAX_PAYLOAD:
                 raise ValueError("mirror payload too large: %d" % size)
             payload = await reader.readexactly(size) if size else b""
-            self.process(header, payload)
+            result = self.process(header, payload)
+            if inspect.isawaitable(result):
+                # A slow decoder pauses this stream without blocking other
+                # sessions on the shared network loop or dropping references.
+                await result
 
     def process(self, header: bytes, payload: bytes):
         ptype = header[4]
         option = header[6]
         timestamp = struct.unpack_from("<Q", header, 8)[0]
         if ptype == 0:
-            self._video(payload, ntp_to_ns(timestamp))
+            return self._video(payload, ntp_to_ns(timestamp))
         elif ptype == 1:
             self._config(header, payload, option)
         elif ptype == 2:
@@ -203,9 +219,10 @@ class MirrorStream:
         if self._pending_config is not None:
             annexb = self._pending_config + annexb
             self._pending_config = None
-        self.handler.video_packet(annexb, timestamp_ns, keyframe)
+        return self.handler.video_packet(annexb, timestamp_ns, keyframe)
 
     def stop(self):
+        self._accepting = False
         if self._server:
             self._server.close()
             self._server = None

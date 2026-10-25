@@ -389,6 +389,7 @@ class AirPlaySession:
             if self.handler:
                 handler, self.handler = self.handler, None
                 handler.stopped()
+            self.server.release(self)
 
     # -- SETUP -----------------------------------------------------------
 
@@ -460,24 +461,39 @@ class AirPlaySession:
             resp.close_after = True
             return
 
-        timing_port = int(body.get("timingPort", 0) or 0)
-        if self.ntp:
-            self.ntp.stop()
-        self.ntp = NtpClient(self.remote_ip, timing_port)
-        await self.ntp.start()
-
-        if self.handler is None:
-            self.handler = self.server.create_handler(self)
-            self.handler.started(self.info)
+        try:
+            timing_port = int(body.get("timingPort", 0) or 0)
+            if self.ntp:
+                self.ntp.stop()
+            ntp = self.ntp = NtpClient(self.remote_ip, timing_port)
+            await ntp.start()
+            if self.closed:
+                ntp.stop()
+                raise ConnectionError("session closed during SETUP")
+            if self.handler is None:
+                self.handler = self.server.create_handler(self)
+                self.handler.started(self.info)
+        except BaseException:
+            self.server.release(self)
+            self.close()
+            raise
         log.info("session SETUP from %s (%s, %s) mirroring=%s", self.info.name, self.info.model,
                  self.remote_ip, self.info.mirroring)
 
     async def _setup_video(self, stream):
         self._stop_video()
         stream_id = int(stream.get("streamConnectionID", 0))
-        self.mirror = MirrorStream(self.aeskey, stream_id, self.handler)
-        port = await self.mirror.start()
-        self.handler.video_started()
+        mirror = self.mirror = MirrorStream(self.aeskey, stream_id, self.handler, self.remote_ip)
+        try:
+            port = await mirror.start()
+            if self.closed:
+                raise ConnectionError("session closed during video SETUP")
+            self.handler.video_started()
+        except BaseException:
+            mirror.stop()
+            if self.mirror is mirror:
+                self.mirror = None
+            raise
         return {"type": 110, "dataPort": port}
 
     async def _setup_audio(self, stream):
@@ -489,10 +505,18 @@ class AirPlaySession:
         if not spf:
             spf = {2: 352, 4: 1024, 8: 480}.get(ct, 352)
         remote_control = int(stream.get("controlPort", 0) or 0)
-        self.audio = AudioStream(self.aeskey, self.aesiv, ct, spf, self.handler,
-                                 self.remote_ip, remote_control)
-        data_port, control_port = await self.audio.start()
-        self.handler.audio_started(CODEC_NAMES.get(ct, "unknown"), spf)
+        audio = self.audio = AudioStream(self.aeskey, self.aesiv, ct, spf, self.handler,
+                                        self.remote_ip, remote_control)
+        try:
+            data_port, control_port = await audio.start()
+            if self.closed:
+                raise ConnectionError("session closed during audio SETUP")
+            self.handler.audio_started(CODEC_NAMES.get(ct, "unknown"), spf)
+        except BaseException:
+            audio.stop()
+            if self.audio is audio:
+                self.audio = None
+            raise
         log.info("audio stream: %s spf=%d", CODEC_NAMES.get(ct, ct), spf)
         return {"type": 96, "dataPort": data_port, "controlPort": control_port}
 
@@ -513,13 +537,16 @@ class AirPlaySession:
 
 class AirPlayServer:
     def __init__(self, settings: ReceiverSettings, identity: PairingIdentity, device_id: bytes,
-                 handler_factory):
+                 handler_factory, external_session_count=None):
         self.settings = settings
         self.identity = identity
         self.device_id = device_id
         self.handler_factory = handler_factory
         self.sessions = set()
+        self._admitted = set()
         self._server = None
+        self._running = False
+        self._external_session_count = external_session_count or (lambda: 0)
 
     @property
     def device_id_str(self) -> str:
@@ -530,10 +557,18 @@ class AirPlayServer:
         return self._server.sockets[0].getsockname()[1] if self._server else 0
 
     async def start(self, host="0.0.0.0"):
-        self._server = await asyncio.start_server(self._on_connect, host, self.settings.port)
+        self._running = True
+        try:
+            self._server = await asyncio.start_server(self._on_connect, host, self.settings.port)
+        except BaseException:
+            self._running = False
+            raise
         log.info("AirPlay receiver listening on port %d", self.port)
 
     async def _on_connect(self, reader, writer):
+        if not self._running:
+            writer.close()
+            return
         session = AirPlaySession(self, reader, writer)
         self.sessions.add(session)
         await session.run()
@@ -546,16 +581,31 @@ class AirPlayServer:
                     and session.info.device_id:
                 log.info("replacing previous session of %s", session.info.name)
                 other.close()
-        active = [s for s in self.sessions if s is not session and s.handler]
-        return len(active) < self.settings.max_sessions
+        if session in self._admitted:
+            return True
+        if self.session_count >= self.settings.max_sessions:
+            return False
+        # Reserve synchronously, before SETUP awaits timing socket creation.
+        self._admitted.add(session)
+        return True
+
+    def release(self, session):
+        self._admitted.discard(session)
+
+    @property
+    def session_count(self):
+        """Active/pending AirPlay reservations plus other receiver sessions."""
+        return len(self._admitted) + self._external_session_count()
 
     def create_handler(self, session) -> SessionHandler:
         return self.handler_factory(session)
 
     def session_closed(self, session):
+        self.release(session)
         self.sessions.discard(session)
 
     async def stop(self):
+        self._running = False
         for s in list(self.sessions):
             s.close()
         if self._server:

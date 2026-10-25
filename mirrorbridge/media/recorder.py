@@ -18,7 +18,7 @@ from fractions import Fraction
 import av
 import numpy as np
 
-from .audio import SAMPLE_RATE, sd
+from .audio import SAMPLE_RATE, resolve_device, sd
 from .video import fit_size
 
 log = logging.getLogger(__name__)
@@ -124,6 +124,10 @@ class Recorder:
         self._device_fifo = _Fifo()
         self._mic_fifo = _Fifo()
         self._mic_stream = None
+        self._resource_lock = threading.Lock()
+        self._out = None
+        self._vstream = None
+        self._astream = None
         self._running = False
         self._thread = None
         self._canvas = None
@@ -168,49 +172,65 @@ class Recorder:
         self._pix_fmt = pix_fmt
         log.info("recording %dx%d@%d with %s to %s", width, height, self.fps, codec, self.path)
 
-        self._out = av.open(self.path, "w")
-        vs = self._out.add_stream(codec, rate=self.fps)
-        vs.width, vs.height = width, height
-        vs.pix_fmt = pix_fmt
-        vs.codec_context.options = dict(_ENCODER_OPTIONS.get(codec, {}))
-        if codec not in ("libx264", "h264"):
-            vs.codec_context.bit_rate = 8_000_000
-        vs.codec_context.time_base = Fraction(1, self.fps)
-        self._vstream = vs
-        self._astream = None
-        if self.device_audio or self.microphone:
-            a = self._out.add_stream("aac", rate=SAMPLE_RATE)
-            a.layout = "stereo"
-            a.codec_context.bit_rate = 160_000
-            self._astream = a
+        try:
+            self._out = av.open(self.path, "w")
+            vs = self._out.add_stream(codec, rate=self.fps)
+            self._vstream = vs
+            vs.width, vs.height = width, height
+            vs.pix_fmt = pix_fmt
+            vs.codec_context.options = dict(_ENCODER_OPTIONS.get(codec, {}))
+            if codec not in ("libx264", "h264"):
+                vs.codec_context.bit_rate = 8_000_000
+            vs.codec_context.time_base = Fraction(1, self.fps)
+            if self.device_audio or self.microphone:
+                a = self._out.add_stream("aac", rate=SAMPLE_RATE)
+                self._astream = a
+                a.layout = "stereo"
+                a.codec_context.bit_rate = 160_000
 
-        if self.microphone and sd is not None:
-            try:
-                self._mic_stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                                                  device=self.mic_device, callback=self._mic_callback)
-                self._mic_stream.start()
-            except Exception as exc:
-                log.warning("cannot open microphone: %s", exc)
-                self._mic_stream = None
+            if self.microphone and sd is not None:
+                try:
+                    self._mic_stream = sd.InputStream(
+                        samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                        device=resolve_device(self.mic_device, "input"), callback=self._mic_callback)
+                    self._mic_stream.start()
+                except Exception as exc:
+                    log.warning("cannot open microphone: %s", exc)
+                    self._close_microphone()
 
-        self._running = True
-        self.started_at = time.monotonic()
-        self._thread = threading.Thread(target=self._run, name="recorder", daemon=True)
-        self._thread.start()
+            self._running = True
+            self.started_at = time.monotonic()
+            self._thread = threading.Thread(target=self._run, name="recorder", daemon=True)
+            self._thread.start()
+        except Exception:
+            self._running = False
+            self._close_microphone()
+            self._finish()
+            raise
 
     def stop(self):
-        if not self._running:
-            return
         self._running = False
-        if self._thread:
+        self._close_microphone()
+        if self._thread and self._thread is not threading.current_thread() and self._thread.is_alive():
             self._thread.join(10)
-        if self._mic_stream is not None:
+        if self._thread is None or not self._thread.is_alive():
+            self._finish()
+
+    def _close_microphone(self):
+        # Detach under the lock so stop() and the failing worker can race
+        # safely. A failed PortAudio stop must still attempt close().
+        with self._resource_lock:
+            stream, self._mic_stream = self._mic_stream, None
+        if stream is not None:
             try:
-                self._mic_stream.stop()
-                self._mic_stream.close()
+                stream.stop()
             except Exception:
                 pass
-            self._mic_stream = None
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
     # -- worker ----------------------------------------------------------
 
@@ -292,19 +312,29 @@ class Recorder:
             self.error = str(exc)
             self._running = False
         finally:
+            self._running = False
+            self._close_microphone()
             self._finish()
 
     def _finish(self):
+        with self._resource_lock:
+            out, self._out = self._out, None
+            video, self._vstream = self._vstream, None
+            audio, self._astream = self._astream, None
+        if out is None:
+            return
+        for stream in (video, audio):
+            if stream is None:
+                continue
+            try:
+                for packet in stream.encode(None):
+                    out.mux(packet)
+            except Exception as exc:
+                log.warning("flushing encoder failed: %s", exc)
+                self.error = self.error or str(exc)
         try:
-            for packet in self._vstream.encode(None):
-                self._out.mux(packet)
-            if self._astream is not None:
-                for packet in self._astream.encode(None):
-                    self._out.mux(packet)
-        except Exception as exc:
-            log.warning("flushing encoders failed: %s", exc)
-        try:
-            self._out.close()
+            out.close()
         except Exception as exc:
             log.warning("closing recording failed: %s", exc)
+            self.error = self.error or str(exc)
         log.info("recording saved: %s (%d frames)", self.path, self.frames_written)

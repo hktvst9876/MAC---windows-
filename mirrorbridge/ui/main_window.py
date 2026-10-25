@@ -1,5 +1,6 @@
 """Main window: receiver status, connection instructions and device list."""
 
+import dataclasses
 import html
 import logging
 import threading
@@ -297,20 +298,24 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def open_settings(self):
-        dlg = SettingsDialog(self.config, self)
+        candidate = dataclasses.replace(self.config)
+        dlg = SettingsDialog(candidate, self)
         if not dlg.exec():
             return
         restart = dlg.apply()
+        if restart and self.rows and QMessageBox.question(
+                self, "Apply settings",
+                "Applying these settings restarts the receiver and disconnects all devices. Continue?") \
+                != QMessageBox.Yes:
+            return
+        # Sessions share this object, so commit accepted values without replacing it.
+        for field in dataclasses.fields(self.config):
+            setattr(self.config, field.name, getattr(candidate, field.name))
         self.config.save()
         for win in self.mirror_windows.values():
             win.video.show_stats = self.config.show_stats
             win.act_stats.setChecked(self.config.show_stats)
         if restart:
-            if self.rows and QMessageBox.question(
-                    self, "Apply settings",
-                    "Applying these settings restarts the receiver and disconnects all devices. Continue?") \
-                    != QMessageBox.Yes:
-                return
             self.controller.restart()
         self._refresh()
 

@@ -57,6 +57,9 @@ Shortcuts in a mirroring window: **F** full screen, **Esc** leave full screen, *
 device. Recordings go to `Videos/MirrorBridge` (Windows) or `Movies/MirrorBridge` (macOS), screenshots
 to `Pictures/MirrorBridge`; both folders can be changed in Settings.
 
+Some Settings changes, including audio playback/output and hardware decoding, restart the receiver.
+If devices are connected, you are asked to confirm disconnection; declining keeps the current settings.
+
 ## What it cannot do (and why)
 
 - **Google Cast is not supported.** Chrome and Android only cast to receivers that hold a device
