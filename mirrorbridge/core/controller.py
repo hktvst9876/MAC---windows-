@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 import threading
 
 from PySide6.QtCore import QObject, Signal
@@ -27,7 +28,8 @@ class Controller(QObject):
         self.advertiser = None
         self.webcast = None
         self.status = ("Starting…", True)
-        self._loop = asyncio.new_event_loop()
+        # The selector loop is the most dependable for UDP multicast on Windows.
+        self._loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, name="network", daemon=True)
         self._lock = threading.Lock()
 

@@ -12,6 +12,7 @@ Usage:  python -m mirrorbridge.testing.fake_sender --host 127.0.0.1 --port 7100
 import argparse
 import asyncio
 import hashlib
+import logging
 import math
 import os
 import plistlib
@@ -29,6 +30,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from ..airplay.mirror import stream_cipher
 from ..airplay.ntp import ntp_now
 from ..airplay.playfair import playfair_decrypt
+
+log = logging.getLogger(__name__)
 
 RAW = serialization.Encoding.Raw
 RAW_PUB = serialization.PublicFormat.Raw
@@ -263,13 +266,26 @@ class FakeSender:
             writer.close()
 
     def _encoder(self, width, height, fps):
-        enc = av.CodecContext.create("libx264", "w")
-        enc.width, enc.height = width, height
-        enc.pix_fmt = "yuv420p"
-        enc.time_base = Fraction(1, fps)
-        enc.framerate = Fraction(fps, 1)
-        enc.options = {"preset": "ultrafast", "tune": "zerolatency", "keyint": "100000", "bframes": "0"}
-        return enc
+        last_error = None
+        for name in ("libx264", "h264_videotoolbox", "h264_mf", "h264"):
+            try:
+                enc = av.CodecContext.create(name, "w")
+                enc.width, enc.height = width, height
+                enc.pix_fmt = "yuv420p"
+                enc.time_base = Fraction(1, fps)
+                enc.framerate = Fraction(fps, 1)
+                if name == "libx264":
+                    enc.options = {"preset": "ultrafast", "tune": "zerolatency", "keyint": "100000",
+                                   "bframes": "0"}
+                else:
+                    enc.max_b_frames = 0
+                    enc.gop_size = 100000
+                    enc.bit_rate = 4_000_000
+                enc.open()
+                return enc
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError("no H.264 encoder available: %s" % last_error)
 
     async def _stream_video(self, writer, seconds, width, height, fps, rotate_at):
         enc = self._encoder(width, height, fps)
@@ -363,25 +379,26 @@ async def run(host, port, seconds, width, height, fps, password=None, name="Test
     sender = FakeSender(host, port, name=name, password=password)
     await sender.connect()
     info = await sender.get_info()
-    print("receiver:", info["name"], info["model"], "features 0x%X" % info["features"])
+    log.info("test sender: receiver %s (%s), features 0x%X", info["name"], info["model"], info["features"])
     await sender.pair()
     ekey = await sender.fp_setup()
     status = await sender.setup_session(ekey)
     if status != 200:
-        print("SETUP failed with status", status)
+        log.warning("test sender: SETUP failed with status %d", status)
         sender.close()
         return
     await sender.setup_video()
     await sender.setup_audio()
     await sender.record()
-    print("streaming %.1fs of %dx%d@%d video + AAC audio" % (seconds, width, height, fps))
+    log.info("test sender: streaming %.1fs of %dx%d@%d video + AAC audio", seconds, width, height, fps)
     await sender.stream(seconds, width, height, fps)
     await sender.teardown()
     sender.close()
-    print("done")
+    log.info("test sender: done")
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7100)

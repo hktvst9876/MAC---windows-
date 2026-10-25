@@ -159,7 +159,9 @@ class DeviceSession(SessionHandler):
         if self._ended:
             return
         self._ended = True
-        self.stop_recording()
+        if self.recorder is not None:
+            # Finalizing the MP4 can take a moment; keep the network thread free.
+            threading.Thread(target=self.stop_recording, name="finish-recording").start()
         self.decoder.stop()
         if self._player is not None:
             self._player.close()

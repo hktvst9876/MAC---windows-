@@ -62,7 +62,8 @@ def wait_for(qapp, predicate, timeout=10.0):
 
 def test_airplay_mirroring_through_the_ui(app_env):
     qapp, controller, window, tmp_path = app_env
-    assert wait_for(qapp, lambda: controller.status[0] == "Ready")
+    # The receiver may be up even where multicast (mDNS) is not permitted, e.g. on CI machines.
+    assert wait_for(qapp, lambda: controller.port and controller.status[0] != "Starting…", 20)
     from mirrorbridge.testing.fake_sender import run as run_sender
 
     thread = threading.Thread(target=lambda: asyncio.run(

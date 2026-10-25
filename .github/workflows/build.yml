@@ -12,13 +12,18 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: System libraries (Qt offscreen, PortAudio)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libportaudio2 libegl1 libxkbcommon0 libgl1 libfontconfig1 libdbus-1-3
       - name: Install
         run: pip install -r requirements.txt pytest
@@ -60,6 +65,13 @@ jobs:
         run: iconutil -c icns packaging/icons/MirrorBridge.iconset -o packaging/icons/MirrorBridge.icns
       - name: PyInstaller
         run: pyinstaller --noconfirm packaging/mirrorbridge.spec
+      - name: Smoke test (built app)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then EXE=dist/MirrorBridge/MirrorBridge.exe
+          elif [ "$RUNNER_OS" = "macOS" ]; then EXE=dist/MirrorBridge.app/Contents/MacOS/MirrorBridge
+          else EXE=dist/MirrorBridge/MirrorBridge; fi
+          python tools/smoke_test.py "$EXE"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
