@@ -52,6 +52,11 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -r requirements.txt pyinstaller
+      - name: Use a self-contained cryptography wheel (Intel Mac)
+        # cryptography 49+ has no x86_64 macOS wheels; a source build links Homebrew's
+        # OpenSSL dynamically, which clashes with other bundled copies of libssl.
+        if: matrix.target == 'macos-x64'
+        run: pip install --only-binary=cryptography "cryptography>=41,<49"
       - name: Version
         shell: bash
         run: |
