@@ -1,7 +1,6 @@
 """Main window: receiver status, connection instructions and device list."""
 
 import logging
-import sys
 import threading
 from pathlib import Path
 

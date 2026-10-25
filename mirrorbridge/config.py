@@ -41,7 +41,7 @@ def _default_media_dir(kind: str) -> str:
 
 
 def _default_name() -> str:
-    host = socket.gethostname().split(".")[0].strip() or "Computer"
+    host = socket.gethostname().split(".")[0].strip()[:30] or "Computer"
     return "%s [%s]" % (host, APP_NAME)
 
 

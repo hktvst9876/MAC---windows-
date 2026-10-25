@@ -3,7 +3,6 @@
 import argparse
 import logging
 import logging.handlers
-import os
 import sys
 
 from .config import APP_NAME, APP_VERSION, AppConfig, config_dir

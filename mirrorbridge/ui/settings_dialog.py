@@ -41,7 +41,7 @@ class SettingsDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
         self.name = QLineEdit(self.config.name)
-        self.name.setMaxLength(60)
+        self.name.setMaxLength(50)
         f.addRow("Receiver name:", self.name)
         f.addRow("", self._note("The name shown on your iPhone, iPad or Mac in the Screen Mirroring list."))
         self.password = QLineEdit(self.config.password)

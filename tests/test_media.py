@@ -1,6 +1,5 @@
 import struct
 import time
-from fractions import Fraction
 
 import av
 import numpy as np

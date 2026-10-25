@@ -3,7 +3,6 @@ import base64
 import json
 import os
 import ssl
-import time
 
 import pytest
 
@@ -124,3 +123,12 @@ def test_browser_cast_password(config):
     reply = asyncio.run(main())
     assert reply["type"] == "error"
     assert not controller.sessions
+
+
+def test_certificate_with_very_long_host_name(tmp_path, monkeypatch):
+    import socket
+    from mirrorbridge.webcast.tls import ensure_certificate
+    monkeypatch.setattr(socket, "gethostname",
+                        lambda: "sjc22-bt145-ab3c45f9-e6d9-42c7-bec0-81bbad0ff035-2E02DC2BA8BF.local")
+    cert, key = ensure_certificate(tmp_path, ["192.168.1.20"])
+    assert os.path.getsize(cert) > 0 and os.path.getsize(key) > 0

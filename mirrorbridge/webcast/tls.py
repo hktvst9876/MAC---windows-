@@ -47,12 +47,12 @@ def ensure_certificate(folder: Path, addresses):
 
     key = ec.generate_private_key(ec.SECP256R1())
     host = socket.gethostname() or "mirrorbridge"
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "MirrorBridge (%s)" % host)])
+    # X.509 limits the common name to 64 characters; host names can be longer.
+    common_name = ("MirrorBridge (%s)" % host.split(".")[0][:40])[:64]
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
     alt = [x509.DNSName("localhost")]
-    try:
+    if len(host) <= 253 and host.isascii():
         alt.append(x509.DNSName(host))
-    except Exception:
-        pass
     for addr in sorted(set(addresses)):
         try:
             alt.append(x509.IPAddress(ipaddress.ip_address(addr)))

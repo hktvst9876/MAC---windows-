@@ -1,7 +1,6 @@
 import asyncio
 
 import av
-import pytest
 
 from mirrorbridge.airplay.pairing import PairingIdentity
 from mirrorbridge.airplay.server import AirPlayServer, ReceiverSettings, SessionHandler, verify_digest
@@ -133,3 +132,12 @@ def test_digest_with_qop():
     assert resp == "6629fae49393a05397450978507c4ef1"
     assert verify_digest("GET", header, "Circle Of Life", nonce)
     assert not verify_digest("GET", header, "wrong", nonce)
+
+
+def test_advertised_names_fit_dns_labels():
+    from mirrorbridge.airplay.mdns import instance_name
+    long_name = "sjc22-bt145-ab3c45f9-e6d9-42c7-bec0-81bbad0ff035-2E02DC2BA8BF [MirrorBridge]"
+    assert len(instance_name(long_name).encode()) <= 50
+    assert len(("AABBCCDDEEFF@" + instance_name(long_name)).encode()) <= 63
+    assert len(instance_name("Café " * 20).encode()) <= 50
+    assert instance_name("my.pc") == "my pc"

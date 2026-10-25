@@ -3,7 +3,6 @@
 import asyncio
 import ipaddress
 import logging
-import re
 
 import ifaddr
 from zeroconf import InterfaceChoice, IPVersion, ServiceInfo
@@ -40,10 +39,15 @@ def local_ipv4_addresses():
     return sorted(set(addrs))
 
 
-def _instance_name(name: str) -> str:
-    # Instance names may contain almost anything, but keep them tidy.
+MAX_NAME_BYTES = 50  # DNS labels hold 63 bytes; the RAOP name adds "<12 hex digits>@"
+
+
+def instance_name(name: str) -> str:
+    """The receiver name as it can be advertised (no dots, at most 50 UTF-8 bytes)."""
     name = name.replace(".", " ").strip() or "MirrorBridge"
-    return name[:60]
+    while len(name.encode("utf-8")) > MAX_NAME_BYTES:
+        name = name[:-1]
+    return name.strip()
 
 
 class Advertiser:
@@ -61,7 +65,7 @@ class Advertiser:
 
     def _build_infos(self):
         s = self.server.settings
-        name = _instance_name(s.name)
+        name = instance_name(s.name)
         hexid = "".join("%02X" % b for b in self.server.device_id)
         host = "mirrorbridge-%s.local." % hexid.lower()
         port = self.server.port
@@ -129,6 +133,3 @@ class Advertiser:
             await self._zc.async_close()
             self._zc = None
 
-
-def safe_name(name: str) -> str:
-    return re.sub(r"[\x00-\x1f]", "", name).strip()
