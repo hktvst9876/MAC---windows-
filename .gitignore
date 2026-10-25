@@ -8,3 +8,4 @@ build/
 dist/
 *.spec.bak
 .DS_Store
+packaging/icons/
