@@ -1,5 +1,7 @@
 # MirrorBridge
 
+[![Build](https://github.com/hktvst9876/MAC---windows-/actions/workflows/build.yml/badge.svg)](https://github.com/hktvst9876/MAC---windows-/actions/workflows/build.yml)
+
 **An AirPlay screen-mirroring receiver for Windows and macOS.** Mirror the screen of an iPhone, iPad or
 Mac to your computer, play AirPlay audio, record what you see (with an optional microphone voice-over),
 and take screenshots. Chromebooks and other computers can cast to it from a web browser.

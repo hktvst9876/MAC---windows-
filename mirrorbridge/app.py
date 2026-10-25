@@ -24,7 +24,7 @@ def setup_logging(debug=False):
         console.setFormatter(fmt)
         root.addHandler(console)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("zeroconf").setLevel(logging.WARNING)
+    logging.getLogger("zeroconf").setLevel(logging.ERROR)
     logging.getLogger("libav").setLevel(logging.ERROR)
 
 

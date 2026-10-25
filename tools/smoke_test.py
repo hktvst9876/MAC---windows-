@@ -54,9 +54,33 @@ def main():
     required = ["device connected: Smoke iPhone", "mirror video: h264 640x360", "audio stream: aac",
                 "device disconnected: Smoke iPhone"]
     missing = [r for r in required if r not in log]
-    if missing or "Traceback" in log:
-        raise SystemExit("smoke test failed; missing: %s" % missing)
+    problems = own_errors(log)
+    if missing or problems:
+        raise SystemExit("smoke test failed; missing: %s; errors: %s" % (missing, problems))
     print("smoke test passed")
+
+
+def own_errors(log):
+    """Errors and tracebacks raised by MirrorBridge itself.
+
+    Third-party noise is ignored, e.g. zeroconf logging "No route to host"
+    for multicast on CI machines without a usable network.
+    """
+    problems = []
+    lines = log.splitlines()
+    for i, line in enumerate(lines):
+        if " ERROR " in line and " mirrorbridge" in line:
+            problems.append(line)
+        if line.startswith("Traceback"):
+            block = []
+            for follow in lines[i + 1:]:
+                if not follow.startswith(" ") and not follow.startswith("Traceback"):
+                    block.append(follow)
+                    break
+                block.append(follow)
+            if any("mirrorbridge" in b for b in block):
+                problems.append(" | ".join(block[-3:]))
+    return problems
 
 
 if __name__ == "__main__":

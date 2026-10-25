@@ -1,5 +1,6 @@
 """Main window: receiver status, connection instructions and device list."""
 
+import html
 import logging
 import threading
 from pathlib import Path
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QListW
                                QMainWindow, QMenu, QMessageBox, QPushButton, QStackedWidget, QSystemTrayIcon,
                                QVBoxLayout, QWidget)
 
+from ..airplay.mdns import instance_name
 from ..config import APP_NAME, APP_VERSION, config_dir
 from . import icons
 from .mirror_window import MirrorWindow
@@ -227,7 +229,7 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _refresh(self):
-        self.receiver_name.setText(self.config.name)
+        self.receiver_name.setText(instance_name(self.config.name))
         addrs = self.controller.addresses
         port = self.controller.port
         text = "Network: %s  ·  port %s" % (", ".join(addrs) or "not connected", port or "—")
@@ -313,7 +315,7 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def show_help(self):
-        QMessageBox.information(self, "How to connect", HELP_TEXT % {"name": self.config.name})
+        QMessageBox.information(self, "How to connect", HELP_TEXT % {"name": html.escape(instance_name(self.config.name))})
 
     def show_about(self):
         QMessageBox.about(self, "About %s" % APP_NAME, ABOUT_TEXT % {"version": APP_VERSION})
